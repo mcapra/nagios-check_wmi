@@ -25,32 +25,73 @@ from impacket.dcerpc.v5.dcom import wmi
 from impacket.dcerpc.v5.dcomrt import DCOMConnection
 from impacket.dcerpc.v5.rpcrt import RPC_C_AUTHN_LEVEL_PKT_PRIVACY, RPC_C_AUTHN_LEVEL_PKT_INTEGRITY, RPC_C_AUTHN_LEVEL_NONE
 
-global exit_status
-global exit_code
-
+#------------------------------------------------------------------------------------------------
 def checkcpu(shell):
+	nagios_exit = {}
 	set1 = shell.onecmd('select PercentProcessorTime,Timestamp_Sys100NS from Win32_PerfRawData_PerfOS_Processor where Name="_Total";')
+	
 	time.sleep(2)
 	set2 = shell.onecmd('select PercentProcessorTime,Timestamp_Sys100NS from Win32_PerfRawData_PerfOS_Processor where Name="_Total";')
-	#print str(set1['PercentProcessorTime']['value']) + '|' + str(set1['Timestamp_Sys100NS']['value'])
-	#print str(set2['PercentProcessorTime']['value']) + '|' + str(set2['Timestamp_Sys100NS']['value'])
-	value = float((1-((float(set2['PercentProcessorTime']['value'] - set1['PercentProcessorTime']['value'])) / (float(set2['Timestamp_Sys100NS']['value'] - set1['Timestamp_Sys100NS']['value'])))) * 100)
+	if(args.verbose):
+		for p in set2:
+			print(p)
+		for p in set1:
+			print(p)
+
+	value = float((1-((float(set2[0]['PercentProcessorTime'] - set1[0]['PercentProcessorTime'])) / (float(set2[0]['Timestamp_Sys100NS'] - set1[0]['Timestamp_Sys100NS'])))) * 100)
 	if value < 0:
 		value = 0
 	value = float("{0:.2f}".format(value))
-	nagios_exit = {}
-	nagios_exit['status'] = str('OK - CPU usage is ' + str(value) + '%|\'usage\'=' + str(value) + '%')
-	nagios_exit['code'] = int(0)
-	return nagios_exit
 	
+	if ((args.critical is not None) and (value >= float(args.critical))):
+		nagios_exit['status'] = str('CRITICAL - CPU usage is ' + str(value) + '%|\'usage\'=' + str(value) + '%')
+		nagios_exit['code'] = int(2)
+	elif ((args.warning is not None) and (value >= float(args.warning))):
+		nagios_exit['status'] = str('WARNING - CPU usage is ' + str(value) + '%|\'usage\'=' + str(value) + '%')
+		nagios_exit['code'] = int(1)
+	else:
+		nagios_exit['status'] = str('OK - CPU usage is ' + str(value) + '%|\'usage\'=' + str(value) + '%')
+		nagios_exit['code'] = int(0)
+			
+	return nagios_exit
+#------------------------------------------------------------------------------------------------
 def checkdrivesize(shell):
 	nagios_exit = {}
-	nagios_exit['status'] = str('UNKNOWN - Not yet implemented.')
-	nagios_exit['code'] = int(3)
+	if(args.label is None):
+		nagios_exit['status'] = str('UNKNOWN - You must provide a drive (--label).')
+		nagios_exit['code'] = int(3)
+	else:
+		set = shell.onecmd('Select DeviceID,freespace,Size,VolumeName from Win32_LogicalDisk where DriveType=3;')
+		for el in set:
+			print el['Device']['value']
+		print 
+		nagios_exit = {}
+		nagios_exit['status'] = str('UNKNOWN - Not yet implemented.')
+		nagios_exit['code'] = int(3)
+	
 	return nagios_exit
+#------------------------------------------------------------------------------------------------
+
+
+
+
+
 
 if __name__ == '__main__':
 	import cmd
+	
+	parser = argparse.ArgumentParser(add_help = True, description = "Executes WQL queries and gets object descriptions using Windows Management Instrumentation.")
+
+	parser.add_argument('-H', '--host', action='store', help='The host name or logical address of the remote Windows machine.', required=True)
+	parser.add_argument('-u', '--username', action='store', help='The host name or logical address of the remote Windows machine.', required=True)
+	parser.add_argument('-p', '--password', action='store', help='The host name or logical address of the remote Windows machine.', required=True)
+	parser.add_argument('-C', '--command', action='store', help='The sub-command you wish to run. Currently only \'checkcpu\' is valid.', required=True)
+	parser.add_argument('-v', '--verbose', action='store_true', help='Print extra debug information. Don\'t include this in your check_command definition!', default=False)
+	parser.add_argument('-w', '--warning', action='store', help='The warning threshold for the check. See commands for individual usage.', default=None)
+	parser.add_argument('-c', '--critical', action='store', help='The critical threshold for the check. See commands for individual usage.', default=None)
+	parser.add_argument('-l', '--label', action='store', help='The label for the drive you want to check (C, E, etc).')
+	
+	args = parser.parse_args()
 
 	class WMIQUERY(cmd.Cmd):
 		def __init__(self, iWbemServices):
@@ -90,16 +131,21 @@ if __name__ == '__main__':
 				os.chdir(s)
 	
 		def printReply(self, iEnum):
-			ret1 = ""
-			verbose = False
+			printHeader = True
 			while True:
 				try:
 					pEnum = iEnum.Next(0xffffffff,1)[0]
 					record = pEnum.getProperties()
-					ret1 = str(record['PercentProcessorTime']['value'])
-					ret1 = ret1 + '|' + str(record['Timestamp_Sys100NS']['value'])
-					if verbose is True:
-						print(ret1)
+					if printHeader is True:
+						print '|', 
+						for col in record:
+							print '%s |' % col,
+						print
+						printHeader = False
+					print '|', 
+					for key in record:
+						print '%s |' % record[key]['value'],
+					print 
 				except Exception, e:
 					#import traceback
 					#print traceback.print_exc()
@@ -107,7 +153,6 @@ if __name__ == '__main__':
 						raise
 					else:
 						break
-			iEnum.RemRelease() 
 
 		def default(self, line):
 			line = line.strip('\n')
@@ -115,8 +160,21 @@ if __name__ == '__main__':
 				line = line[:-1]
 			try:
 				iEnumWbemClassObject = self.iWbemServices.ExecQuery(line.strip('\n'))
-				pEnum = iEnumWbemClassObject.Next(0xffffffff,1)[0]
-				ret = pEnum.getProperties()
+				ret = []
+				while True:
+					try:
+						pEnum = iEnumWbemClassObject.Next(0xffffffff,1)[0]
+						record = pEnum.getProperties()
+						temp = {}
+						for key in record:
+							temp[key] = record[key]['value']
+						ret.append(temp)
+					except Exception, e:
+						if str(e).find('S_FALSE') < 0:
+							raise
+						else:
+							break
+				#ret = pEnum.getProperties()
 				iEnumWbemClassObject.RemRelease()
 				return ret
 			except Exception, e:
@@ -129,15 +187,6 @@ if __name__ == '__main__':
 			return True
 
 	try:
-		parser = argparse.ArgumentParser(add_help = True, description = "Executes WQL queries and gets object descriptions using Windows Management Instrumentation.")
-		
-		parser.add_argument('-H', '--host', action='store', help='The host name or logical address of the remote Windows machine.', required=True)
-		parser.add_argument('-u', '--username', action='store', help='The host name or logical address of the remote Windows machine.', required=True)
-		parser.add_argument('-p', '--password', action='store', help='The host name or logical address of the remote Windows machine.', required=True)
-		parser.add_argument('-c', '--command', action='store', help='The sub-command you wish to run. Currently only \'checkcpu\' is valid.', required=True)
-		
-		args = parser.parse_args()
-
 		dcom = DCOMConnection(args.host, args.username, args.password, "", "", "", "", oxidResolver=True,doKerberos=False, kdcHost="")
 
 		iInterface = dcom.CoCreateInstanceEx(wmi.CLSID_WbemLevel1Login,wmi.IID_IWbemLevel1Login)
