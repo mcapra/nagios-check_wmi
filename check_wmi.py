@@ -63,11 +63,14 @@ def checkdrivesize(shell):
 	list = []
 	drives = []
 	key = 'DeviceID'
+	not_found = ''
 	uom = args.unit
 	scalar = {}
-	scalar['kB'] = float(args.bytefactor / args.bytefactor / args.bytefactor )
-	scalar['MB'] = float(args.bytefactor / args.bytefactor / args.bytefactor / args.bytefactor )
-	scalar['GB'] = float(args.bytefactor / args.bytefactor / args.bytefactor / args.bytefactor / args.bytefactor)
+	bytefactor = float(args.bytefactor)
+	scalar['kB'] = float(bytefactor / bytefactor / bytefactor )
+	scalar['MB'] = float(bytefactor / bytefactor / bytefactor / bytefactor )
+	scalar['GB'] = float(bytefactor / bytefactor / bytefactor / bytefactor / bytefactor)
+	check_all = True
 	
 	warning_count = 0
 	critical_count = 0
@@ -84,27 +87,28 @@ def checkdrivesize(shell):
 	if(not ((args.label is not None) and (args.name is not None))):
 		nagios_exit['perfdata'] = '|'
 		if(args.label is not None):
+			check_all = False
 			key = 'DeviceID'
 			if(args.label.find(',') != -1): # list is labels
 				list = args.label.split(',')
 			else:
 				list = [args.label]
 		elif(args.name is not None): # list is names
+			check_all = False
 			key = 'VolumeName'
 			if(args.name.find(',') != -1):
 				list = args.name.split(',')
 			else:
 				list = [args.name]
-				
-		if not list: # list is not set, check all drives and return
-			for p in set:
+		for p in set:
+			if((p[key] in list) or (check_all)):
 				raw_count += 1
-				
+				list.remove(p[key])
 				if(uom == '%'):
 					value = float((float(p['FreeSpace']) / float(p['Size'])) * 100)
 				else:
 					value = (float(p['FreeSpace'])) * scalar[uom]
-				
+			
 				#build perfdata
 				nagios_exit['perfdata'] += '\'' + p[key] + '_freespace\'=' + str(float("{0:.2f}".format(value))) + uom + ';'
 				
@@ -124,37 +128,11 @@ def checkdrivesize(shell):
 				else:
 					nagios_exit['perfdata'] += ';'
 				nagios_exit['perfdata'] += ' '
-		else: # have a list, do it up
-			for p in set:
-				if(p[key] in list):
-					raw_count += 1
-					
-					if(uom == '%'):
-						value = float((float(p['FreeSpace']) / float(p['Size'])) * 100)
-					else:
-						value = (float(p['FreeSpace'])) * scalar[uom]
-				
-					#build perfdata
-					nagios_exit['perfdata'] += '\'' + p[key] + '_freespace\'=' + str(float("{0:.2f}".format(value))) + uom + ';'
-					
-					if (args.warning is not None):
-						nagios_exit['perfdata'] += args.warning + ';'
-						if (value <= float(args.warning)):
-							drives.append(p[key])
-							warning_count += 1
-					else:
-						nagios_exit['perfdata'] += ';'
-						
-					if (args.critical is not None):
-						nagios_exit['perfdata'] += args.critical + ';'
-						if(value <= float(args.critical)):
-							drives.append(p[key])
-							critical_count += 1
-					else:
-						nagios_exit['perfdata'] += ';'
-					nagios_exit['perfdata'] += ' '
-		
 		if(raw_count > 0):	
+			if(len(list) != 0):
+				nagios_exit['status'] = str('CRITICAL - Could not find all the provided drives! Missing: ' + str(list))
+				nagios_exit['code'] = int(2)
+				return nagios_exit
 			if(critical_count > 0):
 				nagios_exit['status'] = str('CRITICAL - Found problems on the following drive(s): ' + str(drives) + '.')
 				nagios_exit['code'] = int(2)
@@ -178,7 +156,53 @@ def checkdrivesize(shell):
 
 	return nagios_exit
 #------------------------------------------------------------------------------------------------
-
+def checkmem(shell):
+	nagios_exit = {}
+	nagios_exit['code'] = int(0)
+	uom = args.unit
+	scalar = {}
+	scalar['kB'] = float(1)
+	scalar['MB'] = float(0.001)
+	scalar['GB'] = float(0.000001)
+	
+	set = shell.onecmd('Select Name,FreePhysicalMemory,TotalVisibleMemorySize from Win32_OperatingSystem;')
+	
+	if not set: # no drives found in set, unknown?
+		nagios_exit['status'] = str('UNKNOWN - Could not detect any memory. Check for WMI table corruption!')
+		nagios_exit['code'] = int(3)
+		nagios_exit['perfdata'] = ''
+		return nagios_exit
+	
+	for p in set:
+		if(uom == '%'):
+			value = float((float(p['FreePhysicalMemory']) / float(p['TotalVisibleMemorySize'])) * 100)
+		else:
+			value = (float(p['TotalVisibleMemorySize']) - float(p['FreePhysicalMemory'])) * scalar[uom]
+			
+		#build perfdata
+		nagios_exit['perfdata'] = '|\'Physical Memory Used\'=' + str(float("{0:.2f}".format(value))) + str(uom) + ';'
+		
+		if (args.warning is not None):
+			nagios_exit['perfdata'] += args.warning + ';'
+			if (value >= float(args.warning)):
+				nagios_exit['status'] = str('WARNING - Physical Memory Used: ' +  str(float("{0:.2f}".format(value))) + uom)
+				nagios_exit['code'] = int(1)
+		else:
+			nagios_exit['perfdata'] += ';'
+			
+		if (args.critical is not None):
+			nagios_exit['perfdata'] += args.critical + ';'
+			if(value >= float(args.critical)):
+				nagios_exit['status'] = str('CRITICAL - Physical Memory Used: ' +  str(float("{0:.2f}".format(value))) + uom)
+				nagios_exit['code'] = int(2)
+		else:
+			nagios_exit['perfdata'] += ';'
+			
+		if(nagios_exit['code'] == 0):
+			nagios_exit['status'] = str('OK - Physical Memory Used: ' + str(float("{0:.2f}".format(value))) + uom)
+			nagios_exit['code'] = int(0)
+			
+	return nagios_exit
 
 
 
@@ -201,12 +225,18 @@ if __name__ == '__main__':
 	parser_checkcpu.add_argument('-c', '--critical', action='store', help='The critical threshold for the check in in percent CPU used. (Example: -c 40)', default=None)
 	
 	parser_checkdrivesize = subparsers.add_parser('checkdrivesize', help='a help')
-	parser_checkdrivesize.add_argument('-w', '--warning', action='store', help='The warning threshold for the check in terms of free space remaining. Meaning is derived from the unit (-u/--unit) used.', default=None)
-	parser_checkdrivesize.add_argument('-c', '--critical', action='store', help='The critical threshold for the check in terms of free space remaining. Meaning is derived from the unit (-u/--unit) used.', default=None)
+	parser_checkdrivesize.add_argument('-w', '--warning', action='store', help='The warning threshold for the check in terms of free space remaining. Meaning is derived from the unit (-U/--unit) used.', default=None)
+	parser_checkdrivesize.add_argument('-c', '--critical', action='store', help='The critical threshold for the check in terms of free space remaining. Meaning is derived from the unit (-U/--unit) used.', default=None)
 	parser_checkdrivesize.add_argument('-U', '--unit', action='store', help='The unit of meansurement used. Defaults to percentage.', choices=['%','GB','MB','kB'], default='%')
-	parser_checkdrivesize.add_argument('-B', '--bytefactor', action='store', help='The bytefactor is either 1000 or 1024 and is used for conversion units eg bytes to GB. Default is 1024.', choices=[1000.0,1024.0], default=1024.0)
+	parser_checkdrivesize.add_argument('-B', '--bytefactor', action='store', help='The bytefactor is either 1000 or 1024 and is used for conversion units eg bytes to GB. Default is 1024.', choices=['1000','1024'], default='1024')
 	parser_checkdrivesize.add_argument('-l', '--label', action='store', help='The label for the drive you want to check (C:, E:, etc). Can support comma-separated list. Example: --label C:,E:,G: or --label C:')
 	parser_checkdrivesize.add_argument('-n', '--name', action='store', help='The name for the drive you want to check (TEAMSHARE, ntfs_share, etc). Can support comma-separated list. Example: -n \'TEAMSHARE\' or --name \'TEAMSHARE,ntfs_share,backup\'.')
+
+	parser_checkmem = subparsers.add_parser('checkmem', help='a help')
+	parser_checkmem.add_argument('-w', '--warning', action='store', help='The warning threshold for the check in terms of total memory utilized. Meaning is derived from the unit (-U/--unit) used.', default=None)
+	parser_checkmem.add_argument('-c', '--critical', action='store', help='The critical threshold for the check in terms of total memory utilized. Meaning is derived from the unit (-U/--unit) used.', default=None)
+	parser_checkmem.add_argument('-U', '--unit', action='store', help='The unit of meansurement used. Defaults to percentage.', choices=['%','GB','MB','kB'], default='%')
+	
 	
 	
 	args = parser.parse_args()
@@ -320,6 +350,8 @@ if __name__ == '__main__':
 			nagios_exit = checkcpu(shell)
 		elif (args.command == 'checkdrivesize'):
 			nagios_exit = checkdrivesize(shell)
+		elif (args.command == 'checkmem'):
+			nagios_exit = checkmem(shell)
 		else:
 			nagios_exit['status'] = 'UNKNOWN - command \'' + args.command + '\' not found.'
 			nagios_exit['perfdata'] = ''
