@@ -11,6 +11,7 @@
 #  Nagios Enterprises
 #  Matthew Capra
 # -- ref https://github.com/CoreSecurity/impacket/blob/master/examples/wmiquery.py
+# -- ref https://msdn.microsoft.com/en-us/library/aa394603(v=vs.85).aspx
 
 import argparse
 import sys
@@ -24,6 +25,18 @@ from impacket.dcerpc.v5.dtypes import NULL
 from impacket.dcerpc.v5.dcom import wmi
 from impacket.dcerpc.v5.dcomrt import DCOMConnection
 from impacket.dcerpc.v5.rpcrt import RPC_C_AUTHN_LEVEL_PKT_PRIVACY, RPC_C_AUTHN_LEVEL_PKT_INTEGRITY, RPC_C_AUTHN_LEVEL_NONE
+
+#------------------------------------------------------------------------------------------------
+def scanservice(shell):
+	return shell.onecmd('Select name, displayname, Started, StartMode, State, Status FROM Win32_Service')
+	
+def scandisk(shell):
+	return shell.onecmd('Select DeviceID,freespace,Size,VolumeName from Win32_LogicalDisk where DriveType=3;')
+	
+def scanprocess(shell):
+	return shell.onecmd('select Name,CommandLine,ExecutablePath from Win32_Process;')
+	return json.dumps(response)
+
 
 #------------------------------------------------------------------------------------------------
 def checkcpu(shell):
@@ -103,7 +116,8 @@ def checkdrivesize(shell):
 		for p in set:
 			if((p[key] in list) or (check_all)):
 				raw_count += 1
-				list.remove(p[key])
+				if(len(list) > 0):
+					list.remove(p[key])
 				if(uom == '%'):
 					value = float((float(p['FreeSpace']) / float(p['Size'])) * 100)
 				else:
@@ -203,7 +217,40 @@ def checkmem(shell):
 			nagios_exit['code'] = int(0)
 			
 	return nagios_exit
+#------------------------------------------------------------------------------------------------
+def checkservice(shell):
+	nagios_exit = {}
+	list = []
+	missing = []
+	
+	if(args.name.find(',') != -1):
+		list = args.name.split(',')
+	else:
+		list = [args.name]
+	wql_list = ''
 
+	print 'Select name, displayname, Started, StartMode, State, Status FROM Win32_Service WHERE name IN (' + str(list)[1:-1] + ');'
+	set = shell.onecmd('Select name, displayname, Started, StartMode, State, Status FROM Win32_Service WHERE name IN (' + str(list)[1:-1] + ');')
+
+	for p in set:
+		if((p['Name'] in list) and (p['State'] == args.state)):
+			list.remove(p['Name'])
+	if(len(list) > 0):
+		nagios_exit['status'] = str('CRITICAL - Could not find service(s) ' + str(list) + ' in ' + args.state + ' state!')
+		nagios_exit['perfdata'] = ''
+		nagios_exit['code'] = int(2)
+		return nagios_exit
+	else:
+		nagios_exit['status'] = str('OK - Found all services in ' + args.state + ' state!')
+		nagios_exit['perfdata'] = ''
+		nagios_exit['code'] = int(0)
+		return nagios_exit
+
+	nagios_exit['status'] = str('UNKNOWN - Something went wrong?')
+	nagios_exit['perfdata'] = ''
+	nagios_exit['code'] = int(3)
+	
+	return nagios_exit
 
 
 
@@ -214,11 +261,12 @@ if __name__ == '__main__':
 	parser = argparse.ArgumentParser(add_help = True, description = "Executes WQL queries and gets object descriptions using Windows Management Instrumentation.")
 
 	parser.add_argument('-H', '--host', action='store', help='The host name or logical address of the remote Windows machine.', required=True)
-	parser.add_argument('-u', '--username', action='store', help='The host name or logical address of the remote Windows machine.', required=True)
-	parser.add_argument('-p', '--password', action='store', help='The host name or logical address of the remote Windows machine.', required=True)
+	parser.add_argument('-d', '--domain', action='store', help='The domain of the remote Windows account.', required=False)
+	parser.add_argument('-u', '--username', action='store', help='The username of the remote Windows account.', required=True)
+	parser.add_argument('-p', '--password', action='store', help='The password of the remote Windows account.', required=True)
 	parser.add_argument('-v', '--verbose', action='store_true', help='Print extra debug information. Don\'t include this in your check_command definition!', default=False)
 	
-	subparsers = parser.add_subparsers(help='sub-command help', dest='command')
+	subparsers = parser.add_subparsers(help='sub-command help', metavar='{checkcpu, checkdrivesize, checkmem}', dest='command')
 	
 	parser_checkcpu = subparsers.add_parser('checkcpu', help='a help')
 	parser_checkcpu.add_argument('-w', '--warning', action='store', help='The warning threshold for the check in percent CPU used. (Example: -w 20)', default=None)
@@ -233,11 +281,17 @@ if __name__ == '__main__':
 	parser_checkdrivesize.add_argument('-n', '--name', action='store', help='The name for the drive you want to check (TEAMSHARE, ntfs_share, etc). Can support comma-separated list. Example: -n \'TEAMSHARE\' or --name \'TEAMSHARE,ntfs_share,backup\'.')
 
 	parser_checkmem = subparsers.add_parser('checkmem', help='a help')
-	parser_checkmem.add_argument('-w', '--warning', action='store', help='The warning threshold for the check in terms of total memory utilized. Meaning is derived from the unit (-U/--unit) used.', default=None)
-	parser_checkmem.add_argument('-c', '--critical', action='store', help='The critical threshold for the check in terms of total memory utilized. Meaning is derived from the unit (-U/--unit) used.', default=None)
+	parser_checkmem.add_argument('-w', '--warning', action='store', help='The warning threshold for the check in terms of total memory used. Meaning is derived from the unit (-U/--unit) used.', default=None)
+	parser_checkmem.add_argument('-c', '--critical', action='store', help='The critical threshold for the check in terms of total memory used. Meaning is derived from the unit (-U/--unit) used.', default=None)
 	parser_checkmem.add_argument('-U', '--unit', action='store', help='The unit of meansurement used. Defaults to percentage.', choices=['%','GB','MB','kB'], default='%')
 	
+	parser_checkservice = subparsers.add_parser('checkservice', help='a help')
+	parser_checkservice.add_argument('-n', '--name', action='store', help='The name of the service. Can support comma-separated list.', required=True)
+	parser_checkservice.add_argument('-s', '--state', action='store', help='The state of the service.', choices=['Running','Stopped'], default='Running')
 	
+	subparsers.add_parser('scandisk',help=argparse.SUPPRESS,add_help=False)
+	subparsers.add_parser('scanservice',help=argparse.SUPPRESS,add_help=False)
+	subparsers.add_parser('scanprocess',help=argparse.SUPPRESS,add_help=False)
 	
 	args = parser.parse_args()
 
@@ -335,7 +389,7 @@ if __name__ == '__main__':
 			return True
 
 	try:
-		dcom = DCOMConnection(args.host, args.username, args.password, "", "", "", "", oxidResolver=True,doKerberos=False, kdcHost="")
+		dcom = DCOMConnection(args.host, args.username, args.password, args.domain, "", "", "", oxidResolver=True,doKerberos=False, kdcHost="")
 
 		iInterface = dcom.CoCreateInstanceEx(wmi.CLSID_WbemLevel1Login,wmi.IID_IWbemLevel1Login)
 		iWbemLevel1Login = wmi.IWbemLevel1Login(iInterface)
@@ -352,6 +406,23 @@ if __name__ == '__main__':
 			nagios_exit = checkdrivesize(shell)
 		elif (args.command == 'checkmem'):
 			nagios_exit = checkmem(shell)
+		elif (args.command == 'checkservice'):
+			nagios_exit = checkservice(shell)
+		elif (args.command == 'scandisk'):
+			print scandisk(shell)
+			iWbemServices.RemRelease()
+			dcom.disconnect()
+			exit(0)
+		elif (args.command == 'scanservice'):
+			print scanservice(shell)
+			iWbemServices.RemRelease()
+			dcom.disconnect()
+			exit(0)
+		elif (args.command == 'scanprocess'):
+			print scanprocess(shell)
+			iWbemServices.RemRelease()
+			dcom.disconnect()
+			exit(0)
 		else:
 			nagios_exit['status'] = 'UNKNOWN - command \'' + args.command + '\' not found.'
 			nagios_exit['perfdata'] = ''
